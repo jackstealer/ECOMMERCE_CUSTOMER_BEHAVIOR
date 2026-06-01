@@ -1,174 +1,218 @@
 """
 Phase 5 — Model Development
+==============================
+Trains multiple classifiers on the feature matrix to predict will_purchase.
 
-This script covers:
-- Train/test split
-- Model selection and training
-- Hyperparameter tuning
-- Model comparison
+Models trained:
+  1. Logistic Regression (baseline, inside Pipeline with StandardScaler)
+  2. Random Forest
+  3. XGBoost (if installed)
+  4. LightGBM (if installed)
+
+Best model (by AUC-ROC) is saved to data/outputs/models/
+
+Run: python notebooks/05_modeling.py
 """
+
+import sys
+from pathlib import Path
+
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+
+import warnings
+warnings.filterwarnings("ignore")
 
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
-import sys
-sys.path.append('../src')
-from models.train import train_random_forest, train_xgboost, prepare_data
-import warnings
-warnings.filterwarnings('ignore')
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score,
+    f1_score, roc_auc_score,
+)
+
+from config.settings import settings
+from src.models.train import (
+    prepare_data,
+    train_logistic_regression,
+    train_random_forest,
+    train_xgboost,
+    train_lightgbm,
+    save_model,
+)
+from src.models.evaluate import evaluate_model, plot_confusion_matrix, plot_roc_curve
+
+FIGS = settings.FIGURES_DIR
+
 
 def main():
     """Main function to run model development pipeline."""
-    
+
     print("=" * 80)
-    print("PHASE 5: MODEL DEVELOPMENT")
+    print("PHASE 5: MODEL DEVELOPMENT (target: will_purchase)")
     print("=" * 80)
-    
-    # Load feature-engineered data
-    print("\n1. Loading feature-engineered data...")
-    df = pd.read_csv('../data/processed/customer_behavior_features.csv')
-    print(f"Dataset shape: {df.shape}")
-    
-    # Prepare data for modeling
-    print("\n2. Preparing data for modeling...")
-    X_train, X_test, y_train, y_test = prepare_data(df, target_col='churned')
-    
-    print(f"Training set size: {X_train.shape[0]} samples")
-    print(f"Test set size: {X_test.shape[0]} samples")
-    print(f"Number of features: {X_train.shape[1]}")
-    print(f"Target distribution in training set:")
-    print(f"  Not Churned: {(y_train == 0).sum()} ({(y_train == 0).sum() / len(y_train) * 100:.1f}%)")
-    print(f"  Churned: {(y_train == 1).sum()} ({(y_train == 1).sum() / len(y_train) * 100:.1f}%)")
-    
-    # Dictionary to store models and their performance
-    models = {}
-    results = {}
-    
-    # Model 1: Logistic Regression
-    print("\n3. Training Logistic Regression...")
-    lr_model = LogisticRegression(random_state=42, max_iter=1000)
-    lr_model.fit(X_train, y_train)
-    models['Logistic Regression'] = lr_model
-    
-    y_pred_lr = lr_model.predict(X_test)
-    y_pred_proba_lr = lr_model.predict_proba(X_test)[:, 1]
-    
-    results['Logistic Regression'] = {
-        'accuracy': accuracy_score(y_test, y_pred_lr),
-        'precision': precision_score(y_test, y_pred_lr),
-        'recall': recall_score(y_test, y_pred_lr),
-        'f1_score': f1_score(y_test, y_pred_lr),
-        'roc_auc': roc_auc_score(y_test, y_pred_proba_lr)
+
+    # ── Load feature matrix ──────────────────────────────────────
+    print("\n1. Loading feature matrix ...")
+    fm_path = settings.PROCESSED_DATA_DIR / "feature_matrix.parquet"
+    if not fm_path.exists():
+        fm_path = settings.PROCESSED_DATA_DIR / "feature_matrix.csv"
+    if not fm_path.exists():
+        print("❌  feature_matrix not found — run Phase 4 first.")
+        return None, None
+
+    fm = pd.read_parquet(fm_path) if fm_path.suffix == ".parquet" else pd.read_csv(fm_path)
+    print(f"   Shape: {fm.shape}")
+    print(f"   Columns: {list(fm.columns)}")
+
+    # ── Prepare train/test split ─────────────────────────────────
+    print("\n2. Preparing data for modeling (target: will_purchase) ...")
+    X_train, X_test, y_train, y_test, feature_names = prepare_data(
+        fm, target_col="will_purchase", test_size=0.20, random_state=42
+    )
+    print(f"   Training set : {X_train.shape[0]:,} rows × {X_train.shape[1]} features")
+    print(f"   Test set     : {X_test.shape[0]:,} rows")
+    print(f"   Buyers in train : {y_train.sum():,}  ({y_train.mean()*100:.1f}%)")
+    print(f"   Buyers in test  : {y_test.sum():,}   ({y_test.mean()*100:.1f}%)")
+
+    # ── Train all models ─────────────────────────────────────────
+    print("\n3. Training models ...")
+    models   = {}
+    results  = {}
+
+    # Logistic Regression
+    print("   a) Logistic Regression ...")
+    lr = train_logistic_regression(X_train, y_train)
+    models["Logistic Regression"] = lr
+    results["Logistic Regression"] = _score(lr, X_test, y_test)
+
+    # Random Forest
+    print("   b) Random Forest ...")
+    rf = train_random_forest(X_train, y_train)
+    models["Random Forest"] = rf
+    results["Random Forest"] = _score(rf, X_test, y_test)
+
+    # XGBoost
+    print("   c) XGBoost ...")
+    xgb = train_xgboost(X_train, y_train)
+    if xgb:
+        models["XGBoost"] = xgb
+        results["XGBoost"] = _score(xgb, X_test, y_test)
+
+    # LightGBM
+    print("   d) LightGBM ...")
+    lgbm = train_lightgbm(X_train, y_train)
+    if lgbm:
+        models["LightGBM"] = lgbm
+        results["LightGBM"] = _score(lgbm, X_test, y_test)
+
+    # ── Model comparison table ───────────────────────────────────
+    print("\n4. Model Comparison:")
+    print("=" * 85)
+    print(f"  {'Model':<22} {'Accuracy':>9} {'Precision':>10} {'Recall':>9}"
+          f" {'F1':>9} {'AUC-ROC':>9}")
+    print("=" * 85)
+    for name, m in results.items():
+        print(f"  {name:<22} {m['accuracy']:>9.4f} {m['precision']:>10.4f} "
+              f"{m['recall']:>9.4f} {m['f1']:>9.4f} {m['roc_auc']:>9.4f}")
+    print("=" * 85)
+
+    # ── Select best model ────────────────────────────────────────
+    best_name  = max(results, key=lambda x: results[x]["roc_auc"])
+    best_model = models[best_name]
+    best_m     = results[best_name]
+    print(f"\n5. Best model: {best_name}")
+    print(f"   AUC-ROC  : {best_m['roc_auc']:.4f}")
+    print(f"   F1 Score : {best_m['f1']:.4f}")
+
+    # ── Feature importance ───────────────────────────────────────
+    feature_importance = {}
+    if hasattr(best_model, "feature_importances_"):
+        fi = dict(zip(feature_names, best_model.feature_importances_))
+        feature_importance = fi
+        top_10 = sorted(fi.items(), key=lambda x: x[1], reverse=True)[:10]
+        print(f"\n6. Top 10 Features ({best_name}):")
+        for feat, imp in top_10:
+            print(f"   {feat:<40}  {imp:.4f}")
+    elif hasattr(best_model, "steps"):
+        # Pipeline (Logistic Regression case)
+        clf = best_model.steps[-1][1]
+        if hasattr(clf, "coef_"):
+            fi = dict(zip(feature_names, np.abs(clf.coef_[0])))
+            feature_importance = fi
+
+    # ── Visualisation ────────────────────────────────────────────
+    print("\n7. Saving evaluation plots ...")
+    FIGS.mkdir(parents=True, exist_ok=True)
+
+    # Confusion matrix + ROC side-by-side
+    y_pred  = best_model.predict(X_test)
+    y_proba = best_model.predict_proba(X_test)[:, 1]
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle(f"{best_name} — Evaluation", fontsize=13, fontweight="bold")
+    plot_confusion_matrix(y_test, y_pred, ax=axes[0])
+    plot_roc_curve(y_test, y_proba, ax=axes[1])
+    plt.tight_layout()
+    path = FIGS / "05_model_evaluation.png"
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"   Saved → {path}")
+
+    # Feature importance bar chart
+    if feature_importance:
+        top = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)[:15]
+        fig, ax = plt.subplots(figsize=(10, 6))
+        feats, imps = zip(*top)
+        ax.barh(list(reversed(feats)), list(reversed(imps)), color="#4f8ef7", alpha=0.85)
+        ax.set_title(f"Feature Importances — {best_name}")
+        ax.set_xlabel("Importance")
+        plt.tight_layout()
+        path = FIGS / "05_feature_importance.png"
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"   Saved → {path}")
+
+    # ── Save best model ──────────────────────────────────────────
+    print(f"\n8. Saving best model ({best_name}) ...")
+    metadata = {
+        "model_type":    best_name,
+        "target_col":    "will_purchase",
+        "n_features":    len(feature_names),
+        "feature_names": feature_names,
+        "test_auc":      round(best_m["roc_auc"], 4),
+        "test_f1":       round(best_m["f1"], 4),
+        "test_precision":round(best_m["precision"], 4),
+        "test_recall":   round(best_m["recall"], 4),
+        "test_accuracy": round(best_m["accuracy"], 4),
+        "best_params":   getattr(best_model, "best_params_", {}),
     }
-    print("Logistic Regression trained successfully!")
-    
-    # Model 2: Random Forest
-    print("\n4. Training Random Forest...")
-    rf_model = train_random_forest(X_train, y_train)
-    models['Random Forest'] = rf_model
-    
-    y_pred_rf = rf_model.predict(X_test)
-    y_pred_proba_rf = rf_model.predict_proba(X_test)[:, 1]
-    
-    results['Random Forest'] = {
-        'accuracy': accuracy_score(y_test, y_pred_rf),
-        'precision': precision_score(y_test, y_pred_rf),
-        'recall': recall_score(y_test, y_pred_rf),
-        'f1_score': f1_score(y_test, y_pred_rf),
-        'roc_auc': roc_auc_score(y_test, y_pred_proba_rf)
-    }
-    print("Random Forest trained successfully!")
-    
-    # Model 3: Gradient Boosting
-    print("\n5. Training Gradient Boosting...")
-    gb_model = GradientBoostingClassifier(n_estimators=100, random_state=42)
-    gb_model.fit(X_train, y_train)
-    models['Gradient Boosting'] = gb_model
-    
-    y_pred_gb = gb_model.predict(X_test)
-    y_pred_proba_gb = gb_model.predict_proba(X_test)[:, 1]
-    
-    results['Gradient Boosting'] = {
-        'accuracy': accuracy_score(y_test, y_pred_gb),
-        'precision': precision_score(y_test, y_pred_gb),
-        'recall': recall_score(y_test, y_pred_gb),
-        'f1_score': f1_score(y_test, y_pred_gb),
-        'roc_auc': roc_auc_score(y_test, y_pred_proba_gb)
-    }
-    print("Gradient Boosting trained successfully!")
-    
-    # Model 4: XGBoost (if available)
-    try:
-        print("\n6. Training XGBoost...")
-        xgb_model = train_xgboost(X_train, y_train)
-        models['XGBoost'] = xgb_model
-        
-        y_pred_xgb = xgb_model.predict(X_test)
-        y_pred_proba_xgb = xgb_model.predict_proba(X_test)[:, 1]
-        
-        results['XGBoost'] = {
-            'accuracy': accuracy_score(y_test, y_pred_xgb),
-            'precision': precision_score(y_test, y_pred_xgb),
-            'recall': recall_score(y_test, y_pred_xgb),
-            'f1_score': f1_score(y_test, y_pred_xgb),
-            'roc_auc': roc_auc_score(y_test, y_pred_proba_xgb)
-        }
-        print("XGBoost trained successfully!")
-    except Exception as e:
-        print(f"XGBoost training skipped: {e}")
-    
-    # Model comparison
-    print("\n7. Model Performance Comparison:")
-    print("=" * 100)
-    print(f"{'Model':<20} {'Accuracy':<12} {'Precision':<12} {'Recall':<12} {'F1-Score':<12} {'ROC-AUC':<12}")
-    print("=" * 100)
-    
-    for model_name, metrics in results.items():
-        print(f"{model_name:<20} "
-              f"{metrics['accuracy']:<12.4f} "
-              f"{metrics['precision']:<12.4f} "
-              f"{metrics['recall']:<12.4f} "
-              f"{metrics['f1_score']:<12.4f} "
-              f"{metrics['roc_auc']:<12.4f}")
-    
-    print("=" * 100)
-    
-    # Find best model
-    best_model_name = max(results, key=lambda x: results[x]['roc_auc'])
-    best_model = models[best_model_name]
-    
-    print(f"\n8. Best Model: {best_model_name}")
-    print(f"   ROC-AUC Score: {results[best_model_name]['roc_auc']:.4f}")
-    
-    # Feature importance (for tree-based models)
-    if hasattr(best_model, 'feature_importances_'):
-        print(f"\n9. Top 10 Most Important Features ({best_model_name}):")
-        feature_importance = pd.DataFrame({
-            'feature': X_train.columns,
-            'importance': best_model.feature_importances_
-        }).sort_values('importance', ascending=False)
-        
-        print(feature_importance.head(10).to_string(index=False))
-    
-    # Save predictions
-    print("\n10. Saving predictions...")
-    predictions_df = pd.DataFrame({
-        'actual': y_test,
-        'predicted': best_model.predict(X_test),
-        'probability': best_model.predict_proba(X_test)[:, 1]
-    })
-    predictions_df.to_csv('../data/outputs/predictions.csv', index=False)
-    print("Predictions saved to: ../data/outputs/predictions.csv")
-    
+    model_path = save_model(best_model, metadata, settings.MODEL_DIR)
+    print(f"   Saved → {model_path}")
+
     print("\n" + "=" * 80)
-    print("PHASE 5 COMPLETE: Model Development Finished!")
+    print("PHASE 5 COMPLETE")
     print("=" * 80)
-    
-    return models, results, X_test, y_test
+
+    return models, results, X_test, y_test, y_proba, feature_importance, feature_names
+
+
+def _score(model, X_test, y_test) -> dict:
+    """Compute classification metrics for a model."""
+    y_pred  = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)[:, 1]
+    return {
+        "accuracy":  accuracy_score(y_test, y_pred),
+        "precision": precision_score(y_test, y_pred, zero_division=0),
+        "recall":    recall_score(y_test, y_pred, zero_division=0),
+        "f1":        f1_score(y_test, y_pred, zero_division=0),
+        "roc_auc":   roc_auc_score(y_test, y_proba),
+    }
 
 
 if __name__ == "__main__":
-    models, results, X_test, y_test = main()
+    main()

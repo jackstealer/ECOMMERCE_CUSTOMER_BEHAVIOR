@@ -8,40 +8,45 @@ Tables created (saved to data/raw/):
   products.csv       →    500 rows   (product catalog)
   sessions.csv       → 20,000 rows   (web sessions)
   browse_events.csv  → ~70-90k rows  (click / view / cart events)
-  orders.csv         →  8,000 rows   (purchase records)
+  orders.csv         →  8,000 rows   (pu    rchase records)
   order_items.csv    → ~20,000 rows  (line items per order)
 
 Usage:
   python src/data/generate_data.py
+  python pipeline.py  (runs full pipeline)
 ─────────────────────────────────────────────────────────────
 """
 
-import os
 import random
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from faker import Faker
 
-# ── Reproducibility ────────────────────────────────────────
+# ── Import settings (all magic constants live there) ──────────
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from config.settings import settings
+
+CFG        = settings.DATA_CONFIG
+START_DATE = datetime.strptime(CFG["start_date"], "%Y-%m-%d")
+END_DATE   = datetime.strptime(CFG["end_date"],   "%Y-%m-%d")
+N_USERS    = CFG["n_users"]
+N_PRODUCTS = CFG["n_products"]
+N_SESSIONS = CFG["n_sessions"]
+N_ORDERS   = CFG["n_orders"]
+
+# ── Reproducibility ───────────────────────────────────────────
 SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 fake = Faker("en_US")
 Faker.seed(SEED)
 
-# ── Config ─────────────────────────────────────────────────
-START_DATE = datetime(2024, 6, 1)
-END_DATE   = datetime(2025, 5, 31)
-N_USERS    = 5_000
-N_PRODUCTS =   500
-N_SESSIONS = 20_000
-N_ORDERS   =  8_000
-OUTPUT_DIR = "data/raw"
 
-
-# ── Helpers ────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────
 
 def rand_date(start: datetime, end: datetime) -> datetime:
     """Return a random datetime between start and end."""
@@ -49,7 +54,7 @@ def rand_date(start: datetime, end: datetime) -> datetime:
     return start + timedelta(seconds=random.randint(0, delta_secs))
 
 
-# ── Table generators ───────────────────────────────────────
+# ── Table generators ──────────────────────────────────────────
 
 def generate_users(n: int = N_USERS) -> pd.DataFrame:
     """
@@ -61,11 +66,12 @@ def generate_users(n: int = N_USERS) -> pd.DataFrame:
     """
     print(f"  Generating {n:,} users ...")
 
-    genders    = np.random.choice(["Male", "Female", "Other"], n, p=[0.47, 0.47, 0.06])
+    genders    = np.random.choice(["Male", "Female", "Other"], n, p=CFG["gender_probs"])
     ages       = np.clip(np.random.normal(33, 10, n).astype(int), 18, 70)
-    devices    = np.random.choice(["mobile", "desktop", "tablet"], n, p=[0.55, 0.35, 0.10])
-    membership = np.random.choice(["free", "silver", "gold", "platinum"], n,
-                                   p=[0.55, 0.25, 0.15, 0.05])
+    devices    = np.random.choice(["mobile", "desktop", "tablet"], n, p=CFG["device_probs"])
+    membership = np.random.choice(
+        ["free", "silver", "gold", "platinum"], n, p=CFG["membership_probs"]
+    )
 
     # Older users joined earlier
     signup_dates = [
@@ -75,12 +81,12 @@ def generate_users(n: int = N_USERS) -> pd.DataFrame:
 
     return pd.DataFrame({
         "user_id":     [f"U{str(i).zfill(5)}" for i in range(1, n + 1)],
-        "name":        [fake.name()         for _ in range(n)],
-        "email":       [fake.email()        for _ in range(n)],
+        "name":        [fake.name()        for _ in range(n)],
+        "email":       [fake.email()       for _ in range(n)],
         "age":         ages,
         "gender":      genders,
-        "city":        [fake.city()         for _ in range(n)],
-        "state":       [fake.state_abbr()   for _ in range(n)],
+        "city":        [fake.city()        for _ in range(n)],
+        "state":       [fake.state_abbr()  for _ in range(n)],
         "device_type": devices,
         "membership":  membership,
         "signup_date": signup_dates,
@@ -97,7 +103,6 @@ def generate_products(n: int = N_PRODUCTS) -> pd.DataFrame:
     """
     print(f"  Generating {n:,} products ...")
 
-    # Category → subcategory → typical price range
     catalog = {
         "Electronics":   {"subs": ["Smartphones", "Laptops", "Headphones", "Cameras", "Tablets"],
                           "price": (20, 2000)},
@@ -151,12 +156,16 @@ def generate_sessions(users_df: pd.DataFrame, n: int = N_SESSIONS) -> pd.DataFra
     # Active users visit more often — sample with replacement, weight by activity
     activity_weights = np.random.dirichlet(np.ones(len(user_ids)) * 2)
 
+    referral_sources = ["organic_search", "paid_search", "social_media",
+                        "email", "direct", "referral"]
+    referral_probs   = CFG["referral_probs"]  # realistic channel mix from config
+
     rows = []
     for i in range(1, n + 1):
         uid      = np.random.choice(user_ids, p=activity_weights)
         start    = rand_date(START_DATE, END_DATE)
-        duration = int(np.random.exponential(600))          # seconds, avg 10 min
-        duration = max(10, min(duration, 7200))             # clamp 10s – 2h
+        duration = int(np.random.exponential(CFG["avg_session_secs"]))
+        duration = max(10, min(duration, 7200))    # clamp 10s – 2h
         end      = start + timedelta(seconds=duration)
 
         rows.append({
@@ -166,19 +175,18 @@ def generate_sessions(users_df: pd.DataFrame, n: int = N_SESSIONS) -> pd.DataFra
             "session_end":     end.strftime("%Y-%m-%d %H:%M:%S"),
             "duration_secs":   duration,
             "device":          random.choice(["mobile", "desktop", "tablet"]),
-            "referral_source": random.choice(
-                ["organic_search", "paid_search", "social_media", "email", "direct", "referral"],
-                # p=[0.30, 0.20, 0.20, 0.15, 0.10, 0.05]  # realistic channel mix — uncomment to weight
-            ),
+            "referral_source": np.random.choice(referral_sources, p=referral_probs),
             "pages_visited":   max(1, int(np.random.exponential(5))),
-            "bounced":         random.random() < 0.38,     # 38% bounce rate
+            "bounced":         random.random() < CFG["bounce_rate"],
         })
 
     return pd.DataFrame(rows)
 
 
-def generate_browse_events(sessions_df: pd.DataFrame,
-                            products_df: pd.DataFrame) -> pd.DataFrame:
+def generate_browse_events(
+    sessions_df: pd.DataFrame,
+    products_df: pd.DataFrame,
+) -> pd.DataFrame:
     """
     Granular click / view / cart events within sessions.
 
@@ -191,10 +199,9 @@ def generate_browse_events(sessions_df: pd.DataFrame,
     product_ids = products_df["product_id"].tolist()
 
     # Popular products follow a power-law distribution
-    pop_weights = np.random.dirichlet(np.ones(len(product_ids)) * 0.3)
-
+    pop_weights  = np.random.dirichlet(np.ones(len(product_ids)) * 0.3)
     event_types  = ["view", "click", "add_to_cart", "remove_from_cart", "add_to_wishlist"]
-    event_probs  = [0.50,   0.25,    0.14,          0.06,               0.05]
+    event_probs  = CFG["event_probs"]
 
     rows = []
     for _, session in sessions_df.iterrows():
@@ -230,29 +237,37 @@ def generate_orders(users_df: pd.DataFrame, n: int = N_ORDERS) -> pd.DataFrame:
     regular = users_df[users_df["membership"].isin(["free", "silver"])]["user_id"].tolist()
 
     # 70% of orders from premium (smaller) group — they are your best customers
-    buyer_pool = random.choices(premium, k=int(n * 0.70)) + \
-                 random.choices(regular, k=int(n * 0.30))
+    buyer_pool = (
+        random.choices(premium, k=int(n * 0.70))
+        + random.choices(regular, k=int(n * 0.30))
+    )
 
     statuses = ["delivered", "shipped", "processing", "cancelled", "returned"]
-    s_probs  = [0.65,        0.15,      0.10,         0.06,         0.04]
+    s_probs  = [0.65, 0.15, 0.10, 0.06, 0.04]
 
     rows = []
     for i in range(1, n + 1):
         rows.append({
-            "order_id":        f"O{str(i).zfill(6)}",
-            "user_id":         buyer_pool[i - 1],
-            "order_date":      rand_date(START_DATE, END_DATE).strftime("%Y-%m-%d %H:%M:%S"),
-            "total_amount":    round(random.uniform(5.0, 1500.0), 2),
-            "status":          np.random.choice(statuses, p=s_probs),
-            "payment_method":  random.choice(["credit_card", "debit_card", "paypal", "upi", "wallet"]),
-            "discount_pct":    random.choice([0, 0, 0, 5, 10, 15, 20, 25]),  # 0 most common
+            "order_id":       f"O{str(i).zfill(6)}",
+            "user_id":        buyer_pool[i - 1],
+            "order_date":     rand_date(START_DATE, END_DATE).strftime("%Y-%m-%d %H:%M:%S"),
+            "total_amount":   round(
+                random.uniform(CFG["order_value_min"], CFG["order_value_max"]), 2
+            ),
+            "status":         np.random.choice(statuses, p=s_probs),
+            "payment_method": random.choice(
+                ["credit_card", "debit_card", "paypal", "upi", "wallet"]
+            ),
+            "discount_pct":   random.choice([0, 0, 0, 5, 10, 15, 20, 25]),
         })
 
     return pd.DataFrame(rows)
 
 
-def generate_order_items(orders_df: pd.DataFrame,
-                          products_df: pd.DataFrame) -> pd.DataFrame:
+def generate_order_items(
+    orders_df: pd.DataFrame,
+    products_df: pd.DataFrame,
+) -> pd.DataFrame:
     """
     Line items for every order (1–5 products each).
 
@@ -282,16 +297,23 @@ def generate_order_items(orders_df: pd.DataFrame,
     return pd.DataFrame(rows)
 
 
-# ── Main ───────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────
 
-def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+def main(output_dir: Path | None = None) -> dict:
+    """
+    Generate all tables and save to output_dir (defaults to settings.RAW_DATA_DIR).
+
+    Returns:
+        Dict of generated DataFrames.
+    """
+    out = output_dir or settings.RAW_DATA_DIR
+    out.mkdir(parents=True, exist_ok=True)
+
     print(f"\n{'='*55}")
     print(" E-Commerce Synthetic Data Generator")
-    print(f" Output → {OUTPUT_DIR}/")
+    print(f" Output → {out}/")
     print(f"{'='*55}\n")
 
-    # Generate
     users    = generate_users()
     products = generate_products()
     sessions = generate_sessions(users)
@@ -299,7 +321,6 @@ def main():
     orders   = generate_orders(users)
     items    = generate_order_items(orders, products)
 
-    # Save
     datasets = {
         "users":         users,
         "products":      products,
@@ -314,15 +335,17 @@ def main():
     print(f"{'─'*55}")
 
     for name, df in datasets.items():
-        path = f"{OUTPUT_DIR}/{name}.csv"
+        path = out / f"{name}.csv"
         df.to_csv(path, index=False)
-        print(f"  {name:<20} {len(df):>8,}   {df.shape[1]:>5}   {path}")
+        print(f"  {name:<20} {len(df):>8,}   {df.shape[1]:>5}   {path.name}")
 
     print(f"{'─'*55}")
     total_rows = sum(len(df) for df in datasets.values())
     print(f"  {'TOTAL':<20} {total_rows:>8,}")
-    print(f"\n  All files saved to {OUTPUT_DIR}/")
-    print("  Run the Phase 1 notebook next.\n")
+    print(f"\n  All files saved to {out}/")
+    print("  Run pipeline.py next.\n")
+
+    return datasets
 
 
 if __name__ == "__main__":

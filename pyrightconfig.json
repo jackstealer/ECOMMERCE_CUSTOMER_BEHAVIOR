@@ -1,0 +1,18 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonPath": ".venv/Scripts/python.exe",
+  "pythonVersion": "3.12",
+  "include": [
+    "api",
+    "src",
+    "config",
+    "notebooks"
+  ],
+  "extraPaths": [
+    "."
+  ],
+  "ignore": [
+    ".venv"
+  ]
+}

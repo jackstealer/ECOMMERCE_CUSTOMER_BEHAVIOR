@@ -1,231 +1,249 @@
 """
 Phase 6 — Evaluation & Interpretation
+========================================
+Full evaluation of the best model:
+  - Metrics (AUC-ROC, F1, Precision, Recall, Accuracy)
+  - Confusion matrix & ROC curve
+  - SHAP global & local explanations
+  - Lift / cumulative gains curve
+  - Optimal threshold analysis
+  - Saves dashboard_data.json for the HTML dashboard (REAL numbers)
+  - Saves evaluation_report.csv for the Streamlit app
 
-This script covers:
-- Model performance metrics
-- Confusion matrix analysis
-- Feature importance
-- Model interpretation (SHAP values)
+Run: python notebooks/06_evaluation.py
 """
 
+import sys
+from pathlib import Path
+
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+
+import warnings
+warnings.filterwarnings("ignore")
+
+import json
+import joblib
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import (
-    classification_report, confusion_matrix, 
-    roc_curve, roc_auc_score, precision_recall_curve
+
+from sklearn.model_selection import train_test_split
+
+from config.settings import settings
+from src.models.train import prepare_data
+from src.models.evaluate import (
+    evaluate_model,
+    build_lift_table,
+    optimal_threshold,
+    plot_confusion_matrix,
+    plot_roc_curve,
+    save_evaluation_report,
 )
-import sys
-sys.path.append('../src')
-from models.evaluate import evaluate_model, plot_confusion_matrix
-import warnings
-warnings.filterwarnings('ignore')
+
+FIGS = settings.FIGURES_DIR
+
+
+def load_model_and_meta():
+    """Load the latest saved model and its metadata."""
+    model_dir = settings.MODEL_DIR
+    pkl_files  = sorted(model_dir.glob("best_model_*.pkl"))
+    meta_files = sorted(model_dir.glob("model_metadata_*.json"))
+
+    if not pkl_files:
+        return None, {}
+
+    model = joblib.load(pkl_files[-1])
+    meta  = json.loads(meta_files[-1].read_text()) if meta_files else {}
+    return model, meta
+
 
 def main():
     """Main function to run model evaluation."""
-    
+
     print("=" * 80)
-    print("PHASE 6: MODEL EVALUATION & INTERPRETATION")
+    print("PHASE 6: EVALUATION & INTERPRETATION (will_purchase)")
     print("=" * 80)
-    
-    # Load predictions
-    print("\n1. Loading predictions...")
+
+    # ── Load model ───────────────────────────────────────────────
+    print("\n1. Loading trained model ...")
+    model, meta = load_model_and_meta()
+    if model is None:
+        print("❌  No trained model found — run Phase 5 first.")
+        return None
+
+    print(f"   Model type  : {meta.get('model_type', type(model).__name__)}")
+    print(f"   AUC-ROC     : {meta.get('test_auc', 'N/A')}")
+    print(f"   F1 Score    : {meta.get('test_f1',  'N/A')}")
+
+    # ── Load feature matrix ──────────────────────────────────────
+    print("\n2. Loading feature matrix ...")
+    fm_path = settings.PROCESSED_DATA_DIR / "feature_matrix.parquet"
+    if not fm_path.exists():
+        fm_path = settings.PROCESSED_DATA_DIR / "feature_matrix.csv"
+    if not fm_path.exists():
+        print("❌  feature_matrix not found — run Phase 4 first.")
+        return None
+
+    fm = pd.read_parquet(fm_path) if fm_path.suffix == ".parquet" else pd.read_csv(fm_path)
+
+    # ── Reproduce exact same split used in training ──────────────
+    X_train, X_test, y_train, y_test, feature_names = prepare_data(
+        fm, target_col="will_purchase", test_size=0.20, random_state=42
+    )
+    y_pred  = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)[:, 1]
+
+    # ── Full metrics ─────────────────────────────────────────────
+    print("\n3. Performance Metrics:")
+    results = evaluate_model(model, X_test, y_test)
+    print(results["report"])
+
+    scalar = {k: v for k, v in results.items() if isinstance(v, (int, float))}
+    print("   Metric summary:")
+    for k, v in scalar.items():
+        print(f"   {k:<20} {v:.4f}")
+
+    # ── Confusion matrix + ROC ───────────────────────────────────
+    print("\n4. Plotting confusion matrix and ROC curve ...")
+    FIGS.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle("Phase 6 — Model Evaluation", fontsize=13, fontweight="bold")
+    plot_confusion_matrix(y_test, y_pred, ax=axes[0])
+    plot_roc_curve(y_test, y_proba, ax=axes[1])
+    plt.tight_layout()
+    p = FIGS / "06_roc_pr_threshold.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"   Saved → {p}")
+
+    # ── Lift curve ───────────────────────────────────────────────
+    print("\n5. Building lift / cumulative gains table ...")
+    lift_df = build_lift_table(y_test.values, y_proba)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    fig.suptitle("Lift & Cumulative Gains", fontsize=13, fontweight="bold")
+
+    axes[0].plot(lift_df["pct_targeted"] * 100, lift_df["pct_captured"] * 100,
+                 color="#4f8ef7", lw=2, label="Model")
+    axes[0].plot([0, 100], [0, 100], "k--", lw=1, label="Random")
+    axes[0].set_title("Cumulative Gains Curve")
+    axes[0].set_xlabel("% Users Targeted"); axes[0].set_ylabel("% Buyers Captured")
+    axes[0].legend()
+
+    axes[1].plot(lift_df["pct_targeted"] * 100, lift_df["lift"],
+                 color="#fc8d62", lw=2)
+    axes[1].axhline(1, color="k", linestyle="--", lw=1)
+    axes[1].set_title("Lift Curve")
+    axes[1].set_xlabel("% Users Targeted"); axes[1].set_ylabel("Lift")
+
+    plt.tight_layout()
+    p = FIGS / "06_lift_curve.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"   Saved → {p}")
+
+    # Summary table
+    print("\n   Lift Summary:")
+    print(f"   {'Top %':<10} {'% Buyers Captured':<22} {'Lift':>6}")
+    for pct in [0.10, 0.20, 0.30, 0.50]:
+        row = lift_df[lift_df["pct_targeted"] >= pct].iloc[0]
+        print(f"   {pct*100:.0f}%{'':7} {row['pct_captured']*100:.1f}%{'':14} "
+              f"{row['lift']:.2f}×")
+
+    # ── Optimal threshold ────────────────────────────────────────
+    print("\n6. Optimal threshold analysis ...")
+    thresh, best_f1 = optimal_threshold(y_test.values, y_proba)
+    print(f"   Optimal threshold : {thresh:.4f}")
+    print(f"   F1 at threshold   : {best_f1:.4f}")
+    print(f"   Default (0.5) F1  : {results['f1']:.4f}")
+
+    # ── SHAP explanations ────────────────────────────────────────
     try:
-        predictions_df = pd.read_csv('../data/outputs/predictions.csv')
-        print(f"Predictions loaded: {predictions_df.shape[0]} samples")
-    except FileNotFoundError:
-        print("Error: predictions.csv not found. Please run Phase 5 (modeling) first.")
-        return
-    
-    y_test = predictions_df['actual']
-    y_pred = predictions_df['predicted']
-    y_pred_proba = predictions_df['probability']
-    
-    # Classification Report
-    print("\n2. Classification Report:")
-    print(classification_report(y_test, y_pred, 
-                                target_names=['Not Churned', 'Churned']))
-    
-    # Confusion Matrix
-    print("\n3. Confusion Matrix:")
-    cm = confusion_matrix(y_test, y_pred)
-    print(cm)
-    
-    # Plot confusion matrix
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                xticklabels=['Not Churned', 'Churned'],
-                yticklabels=['Not Churned', 'Churned'])
-    plt.title('Confusion Matrix', fontsize=16, fontweight='bold')
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
-    plt.tight_layout()
-    plt.savefig('../reports/figures/confusion_matrix.png', dpi=300, bbox_inches='tight')
-    print("Saved confusion matrix to: ../reports/figures/confusion_matrix.png")
-    plt.show()
-    
-    # ROC Curve
-    print("\n4. ROC Curve Analysis:")
-    fpr, tpr, thresholds = roc_curve(y_test, y_pred_proba)
-    roc_auc = roc_auc_score(y_test, y_pred_proba)
-    
-    plt.figure(figsize=(8, 6))
-    plt.plot(fpr, tpr, color='darkorange', lw=2, 
-             label=f'ROC curve (AUC = {roc_auc:.3f})')
-    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', 
-             label='Random Classifier')
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel('False Positive Rate', fontsize=12)
-    plt.ylabel('True Positive Rate', fontsize=12)
-    plt.title('Receiver Operating Characteristic (ROC) Curve', 
-              fontsize=14, fontweight='bold')
-    plt.legend(loc="lower right")
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig('../reports/figures/roc_curve.png', dpi=300, bbox_inches='tight')
-    print(f"ROC-AUC Score: {roc_auc:.4f}")
-    print("Saved ROC curve to: ../reports/figures/roc_curve.png")
-    plt.show()
-    
-    # Precision-Recall Curve
-    print("\n5. Precision-Recall Curve:")
-    precision, recall, pr_thresholds = precision_recall_curve(y_test, y_pred_proba)
-    
-    plt.figure(figsize=(8, 6))
-    plt.plot(recall, precision, color='blue', lw=2)
-    plt.xlabel('Recall', fontsize=12)
-    plt.ylabel('Precision', fontsize=12)
-    plt.title('Precision-Recall Curve', fontsize=14, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig('../reports/figures/precision_recall_curve.png', 
-                dpi=300, bbox_inches='tight')
-    print("Saved precision-recall curve to: ../reports/figures/precision_recall_curve.png")
-    plt.show()
-    
-    # Prediction distribution
-    print("\n6. Prediction Probability Distribution:")
-    plt.figure(figsize=(10, 6))
-    
-    # Separate probabilities by actual class
-    churned_probs = y_pred_proba[y_test == 1]
-    not_churned_probs = y_pred_proba[y_test == 0]
-    
-    plt.hist(not_churned_probs, bins=50, alpha=0.7, label='Not Churned (Actual)', 
-             color='green', edgecolor='black')
-    plt.hist(churned_probs, bins=50, alpha=0.7, label='Churned (Actual)', 
-             color='red', edgecolor='black')
-    plt.xlabel('Predicted Probability of Churn', fontsize=12)
-    plt.ylabel('Frequency', fontsize=12)
-    plt.title('Distribution of Predicted Probabilities', 
-              fontsize=14, fontweight='bold')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig('../reports/figures/probability_distribution.png', 
-                dpi=300, bbox_inches='tight')
-    print("Saved probability distribution to: ../reports/figures/probability_distribution.png")
-    plt.show()
-    
-    # Model performance metrics
-    print("\n7. Detailed Performance Metrics:")
-    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-    
-    metrics = {
-        'Accuracy': accuracy_score(y_test, y_pred),
-        'Precision': precision_score(y_test, y_pred),
-        'Recall': recall_score(y_test, y_pred),
-        'F1-Score': f1_score(y_test, y_pred),
-        'ROC-AUC': roc_auc
-    }
-    
-    print("\nPerformance Metrics:")
-    print("=" * 40)
-    for metric, value in metrics.items():
-        print(f"{metric:<15}: {value:.4f} ({value*100:.2f}%)")
-    print("=" * 40)
-    
-    # Error analysis
-    print("\n8. Error Analysis:")
-    false_positives = ((y_pred == 1) & (y_test == 0)).sum()
-    false_negatives = ((y_pred == 0) & (y_test == 1)).sum()
-    true_positives = ((y_pred == 1) & (y_test == 1)).sum()
-    true_negatives = ((y_pred == 0) & (y_test == 0)).sum()
-    
-    print(f"True Positives: {true_positives}")
-    print(f"True Negatives: {true_negatives}")
-    print(f"False Positives: {false_positives}")
-    print(f"False Negatives: {false_negatives}")
-    
-    # Business impact analysis
-    print("\n9. Business Impact Analysis:")
-    total_customers = len(y_test)
-    actual_churned = y_test.sum()
-    predicted_churned = y_pred.sum()
-    correctly_identified = true_positives
-    
-    print(f"Total customers evaluated: {total_customers}")
-    print(f"Actual churned customers: {actual_churned} ({actual_churned/total_customers*100:.1f}%)")
-    print(f"Predicted churned customers: {predicted_churned} ({predicted_churned/total_customers*100:.1f}%)")
-    print(f"Correctly identified churners: {correctly_identified} ({correctly_identified/actual_churned*100:.1f}% of actual)")
-    print(f"Missed churners: {false_negatives} ({false_negatives/actual_churned*100:.1f}% of actual)")
-    
-    # Threshold analysis
-    print("\n10. Optimal Threshold Analysis:")
-    from sklearn.metrics import f1_score
-    
-    thresholds_to_test = np.arange(0.3, 0.8, 0.05)
-    threshold_results = []
-    
-    for threshold in thresholds_to_test:
-        y_pred_threshold = (y_pred_proba >= threshold).astype(int)
-        f1 = f1_score(y_test, y_pred_threshold)
-        precision = precision_score(y_test, y_pred_threshold)
-        recall = recall_score(y_test, y_pred_threshold)
-        threshold_results.append({
-            'threshold': threshold,
-            'f1_score': f1,
-            'precision': precision,
-            'recall': recall
-        })
-    
-    threshold_df = pd.DataFrame(threshold_results)
-    best_threshold = threshold_df.loc[threshold_df['f1_score'].idxmax()]
-    
-    print(f"\nBest threshold: {best_threshold['threshold']:.2f}")
-    print(f"F1-Score at best threshold: {best_threshold['f1_score']:.4f}")
-    print(f"Precision at best threshold: {best_threshold['precision']:.4f}")
-    print(f"Recall at best threshold: {best_threshold['recall']:.4f}")
-    
-    # Plot threshold analysis
-    plt.figure(figsize=(10, 6))
-    plt.plot(threshold_df['threshold'], threshold_df['f1_score'], 
-             marker='o', label='F1-Score', linewidth=2)
-    plt.plot(threshold_df['threshold'], threshold_df['precision'], 
-             marker='s', label='Precision', linewidth=2)
-    plt.plot(threshold_df['threshold'], threshold_df['recall'], 
-             marker='^', label='Recall', linewidth=2)
-    plt.axvline(x=best_threshold['threshold'], color='red', 
-                linestyle='--', label=f'Best Threshold ({best_threshold["threshold"]:.2f})')
-    plt.xlabel('Threshold', fontsize=12)
-    plt.ylabel('Score', fontsize=12)
-    plt.title('Threshold Analysis', fontsize=14, fontweight='bold')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig('../reports/figures/threshold_analysis.png', 
-                dpi=300, bbox_inches='tight')
-    print("\nSaved threshold analysis to: ../reports/figures/threshold_analysis.png")
-    plt.show()
-    
+        import shap
+        print("\n7. Computing SHAP values ...")
+
+        # Use underlying estimator if Pipeline
+        estimator = model
+        X_shap    = X_test
+        if hasattr(model, "steps"):
+            # Pipeline: transform data through all but last step
+            from sklearn.pipeline import Pipeline as _Pipeline
+            for name_, step in model.steps[:-1]:
+                X_shap = step.transform(X_shap)
+            estimator = model.steps[-1][1]
+
+        explainer  = shap.TreeExplainer(estimator) if hasattr(estimator, "feature_importances_") \
+                     else shap.LinearExplainer(estimator, X_shap)
+        shap_values = explainer.shap_values(X_shap)
+
+        # For binary classifiers shap_values is sometimes [neg_class, pos_class]
+        sv = shap_values[1] if isinstance(shap_values, list) else shap_values
+
+        # Global summary
+        fig, ax = plt.subplots(figsize=(10, 6))
+        shap.summary_plot(sv, X_shap, feature_names=feature_names,
+                          plot_type="bar", show=False)
+        plt.title("SHAP Feature Importance (Global)")
+        plt.tight_layout()
+        p = FIGS / "06_shap_bar.png"
+        plt.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"   Saved → {p}")
+
+        # SHAP summary dot plot
+        fig, ax = plt.subplots(figsize=(10, 7))
+        shap.summary_plot(sv, X_shap, feature_names=feature_names, show=False)
+        plt.title("SHAP Summary Plot")
+        plt.tight_layout()
+        p = FIGS / "06_shap_summary.png"
+        plt.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"   Saved → {p}")
+
+        # Extract SHAP feature importance for dashboard
+        shap_importance = dict(zip(feature_names, np.abs(sv).mean(axis=0)))
+
+    except ImportError:
+        print("   ⚠️  shap not installed — using model feature_importances_ instead")
+        shap_importance = {}
+        if hasattr(estimator if "estimator" in dir() else model, "feature_importances_"):
+            est = model if not hasattr(model, "steps") else model.steps[-1][1]
+            shap_importance = dict(zip(feature_names, est.feature_importances_))
+    except Exception as e:
+        print(f"   ⚠️  SHAP failed: {e}")
+        shap_importance = {}
+
+    # ── Feature importance (fallback) ────────────────────────────
+    feature_importance = shap_importance
+    if not feature_importance:
+        est = model if not hasattr(model, "steps") else model.steps[-1][1]
+        if hasattr(est, "feature_importances_"):
+            feature_importance = dict(zip(feature_names, est.feature_importances_))
+
+    # ── Save dashboard data (REAL numbers!) ──────────────────────
+    print("\n8. Saving dashboard data (real numbers, no hardcoding) ...")
+    results["y_true"] = y_test.values  # needed for ROC points in save_evaluation_report
+
+    json_path = save_evaluation_report(
+        metrics=results,
+        lift_df=lift_df,
+        feature_importance=feature_importance,
+        output_dir=settings.OUTPUT_DIR,
+    )
+    print(f"   Saved evaluation_report.csv → {settings.OUTPUT_DIR / 'evaluation_report.csv'}")
+    print(f"   Saved dashboard_data.json   → {json_path}")
+
     print("\n" + "=" * 80)
-    print("PHASE 6 COMPLETE: Model Evaluation Finished!")
+    print("PHASE 6 COMPLETE — Dashboard data ready!")
     print("=" * 80)
-    
-    return metrics, threshold_df
+
+    return results
 
 
 if __name__ == "__main__":
-    metrics, threshold_df = main()
+    main()

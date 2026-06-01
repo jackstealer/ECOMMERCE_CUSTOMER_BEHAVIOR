@@ -1,80 +1,106 @@
 """
-Phase 2 — Cleaning & Preprocessing
+Phase 2 — Data Cleaning & Preprocessing
+========================================
+Runs the full cleaning pipeline on all 6 raw tables,
+creates the will_purchase target column, and saves
+cleaned data to data/processed/ as Parquet files.
 
-This script covers:
-- Handling missing values
-- Removing duplicates
-- Data type conversions
-- Outlier detection and treatment
+Run: python notebooks/02_data_cleaning.py
 """
 
-import pandas as pd
-import numpy as np
 import sys
-sys.path.append('../src')
-from data.preprocess import clean_data, handle_missing_values, remove_duplicates, handle_outliers
+from pathlib import Path
 
-def main():
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+
+import pandas as pd
+from config.settings import settings
+from src.data.preprocess import clean_data
+from src.data.validation import DataValidator
+
+
+def main() -> dict:
     """Main function to run data cleaning pipeline."""
-    
+
     print("=" * 80)
     print("PHASE 2: DATA CLEANING & PREPROCESSING")
     print("=" * 80)
-    
-    # Load raw data
-    print("\n1. Loading raw data...")
-    df = pd.read_csv('../data/raw/customer_behavior.csv')
-    print(f"Original dataset shape: {df.shape}")
-    
-    # Check initial data quality
-    print("\n2. Initial Data Quality Check:")
-    print(f"Missing values: {df.isnull().sum().sum()}")
-    print(f"Duplicate rows: {df.duplicated().sum()}")
-    
-    # Display missing values by column
-    missing_values = df.isnull().sum()
-    if missing_values.sum() > 0:
-        print("\nMissing values by column:")
-        print(missing_values[missing_values > 0])
-    
-    # Clean data using preprocessing functions
-    print("\n3. Applying data cleaning pipeline...")
-    df_clean = clean_data(df)
-    
-    print(f"\nCleaned dataset shape: {df_clean.shape}")
-    print(f"Rows removed: {df.shape[0] - df_clean.shape[0]}")
-    
-    # Verify data quality after cleaning
-    print("\n4. Data Quality After Cleaning:")
-    print(f"Missing values: {df_clean.isnull().sum().sum()}")
-    print(f"Duplicate rows: {df_clean.duplicated().sum()}")
-    
-    # Check data types
-    print("\n5. Data Types After Cleaning:")
-    print(df_clean.dtypes)
-    
-    # Statistical summary after cleaning
-    print("\n6. Statistical Summary After Cleaning:")
-    print(df_clean.describe())
-    
-    # Save cleaned data
-    output_path = '../data/processed/customer_behavior_clean.csv'
-    df_clean.to_csv(output_path, index=False)
-    print(f"\n7. Cleaned data saved to: {output_path}")
-    
-    # Summary statistics comparison
-    print("\n8. Summary Statistics Comparison:")
-    print("\nBefore Cleaning:")
-    print(df.describe().loc[['mean', 'std', 'min', 'max']])
-    print("\nAfter Cleaning:")
-    print(df_clean.describe().loc[['mean', 'std', 'min', 'max']])
-    
+
+    # ── Run cleaning pipeline ────────────────────────────────────
+    print("\n1. Running cleaning pipeline ...")
+    tables = clean_data(settings.RAW_DATA_DIR)
+
+    print(f"\n   Tables cleaned: {list(tables.keys())}")
+    print("\n   Row counts after cleaning:")
+    for name, df in tables.items():
+        print(f"   {name:<20} {len(df):>8,} rows  | {df.shape[1]} cols")
+
+    # ── Target variable check ────────────────────────────────────
+    if "users" in tables and "will_purchase" in tables["users"].columns:
+        u = tables["users"]
+        buyers     = u["will_purchase"].sum()
+        non_buyers = len(u) - buyers
+        print(f"\n2. Target variable — will_purchase:")
+        print(f"   Buyers     (1): {buyers:,}  ({buyers/len(u)*100:.1f}%)")
+        print(f"   Non-buyers (0): {non_buyers:,}  ({non_buyers/len(u)*100:.1f}%)")
+    else:
+        print("\n⚠️  'will_purchase' column not found in users table.")
+
+    # ── Data quality validation ──────────────────────────────────
+    print("\n3. Running data quality checks ...")
+    validator = DataValidator()
+
+    # Referential integrity checks
+    if "sessions" in tables and "users" in tables:
+        validator.check_referential_integrity(
+            tables["sessions"], tables["users"],
+            child_fk="user_id", parent_pk="user_id",
+            child_table="sessions", parent_table="users",
+        )
+    if "orders" in tables and "users" in tables:
+        validator.check_referential_integrity(
+            tables["orders"], tables["users"],
+            child_fk="user_id", parent_pk="user_id",
+            child_table="orders", parent_table="users",
+        )
+    if "order_items" in tables and "orders" in tables:
+        validator.check_referential_integrity(
+            tables["order_items"], tables["orders"],
+            child_fk="order_id", parent_pk="order_id",
+            child_table="order_items", parent_table="orders",
+        )
+    if "browse_events" in tables and "products" in tables:
+        validator.check_referential_integrity(
+            tables["browse_events"], tables["products"],
+            child_fk="product_id", parent_pk="product_id",
+            child_table="browse_events", parent_table="products",
+        )
+
+    if validator.validation_errors:
+        print(f"   ❌ Validation errors: {validator.validation_errors}")
+    else:
+        print("   ✅ All referential integrity checks passed")
+
+    if validator.warnings:
+        print(f"   ⚠️  Warnings: {validator.warnings}")
+
+    # ── Save cleaned tables as Parquet ───────────────────────────
+    print(f"\n4. Saving cleaned tables to {settings.PROCESSED_DATA_DIR}/")
+    settings.PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    for name, df in tables.items():
+        # Save both Parquet (fast) and CSV (human-readable)
+        df.to_parquet(settings.PROCESSED_DATA_DIR / f"{name}.parquet", index=False)
+        df.to_csv(settings.PROCESSED_DATA_DIR / f"{name}.csv", index=False)
+        print(f"   Saved {name}.parquet  ({len(df):,} rows)")
+
     print("\n" + "=" * 80)
-    print("PHASE 2 COMPLETE: Data Cleaning Finished!")
+    print("PHASE 2 COMPLETE")
     print("=" * 80)
-    
-    return df_clean
+
+    return tables
 
 
 if __name__ == "__main__":
-    df_clean = main()
+    main()
