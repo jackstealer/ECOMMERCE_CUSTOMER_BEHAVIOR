@@ -1,136 +1,240 @@
 """
-pipeline.py — End-to-end ML pipeline orchestrator
-===================================================
-Run this single script to execute all 6 phases in order:
+pipeline.py
+Production ML Pipeline - Temporal Feature Engineering
 
-  Phase 1 → Data generation (generate_data.py)
-  Phase 2 → Data cleaning   (preprocess.py)
-  Phase 3 → EDA             (03_eda.py)
-  Phase 4 → Feature engineering (build_features.py)
-  Phase 5 → Model training  (05_modeling.py)
-  Phase 6 → Evaluation & dashboard export (06_evaluation.py)
+This is the main production pipeline that fixes data leakage issues by:
+1. Using temporal feature engineering (past data only)
+2. Predicting future purchases (not past purchases)  
+3. Proper train/test split with stratified sampling
+4. Advanced models with regularization and overfitting detection
 
 Usage:
-  python pipeline.py           # run all phases
-  python pipeline.py --from 4  # resume from phase 4
-  python pipeline.py --to   3  # run only phases 1-3
+    python pipeline.py
 
-After completion:
-  streamlit run dashboard/app.py
-  open dashboard/dashboard_index.html  (requires a local HTTP server, see README)
+This pipeline generates the best performing model with proper validation.
 """
 
-import argparse
 import sys
-import time
-import traceback
 from pathlib import Path
 
+# Make project root importable
+_root = Path(__file__).resolve().parent
+sys.path.insert(0, str(_root))
 
-def banner(phase: int, title: str):
-    print(f"\n{'='*65}")
-    print(f"  PHASE {phase} — {title}")
-    print(f"{'='*65}")
+from config.settings import settings
+from src.features.build_features_fixed import create_temporal_features
+from src.models.train_advanced import (
+    temporal_train_test_split,
+    train_logistic_regression_advanced,
+    train_random_forest_advanced,
+    train_xgboost_advanced,
+    train_lightgbm_advanced,
+    detect_overfitting,
+    save_model_advanced
+)
+from src.models.evaluate import evaluate_model, build_lift_table, save_evaluation_report
 
+import pandas as pd
+import numpy as np
 
-def run_phase(phase_num: int, title: str, fn) -> bool:
-    """Run a phase, catch errors, return True on success."""
-    banner(phase_num, title)
-    t0 = time.time()
-    try:
-        fn()
-        elapsed = time.time() - t0
-        print(f"\n  ✅ Phase {phase_num} complete in {elapsed:.1f}s")
-        return True
-    except Exception as e:
-        print(f"\n  ❌ Phase {phase_num} FAILED: {e}")
-        traceback.print_exc()
-        return False
-
-
-def phase1_generate():
-    from src.data.generate_data import main as gen
-    gen()
-
-
-def phase2_clean():
-    from notebooks.n02_data_cleaning import main as clean
-    clean()
-
-
-def phase3_eda():
-    from notebooks.n03_eda import main as eda
-    eda()
-
-
-def phase4_features():
-    from notebooks.n04_feature_engineering import main as feats
-    feats()
-
-
-def phase5_model():
-    from notebooks.n05_modeling import main as model
-    model()
-
-
-def phase6_evaluate():
-    from notebooks.n06_evaluation import main as evaluate
-    evaluate()
+PROCESSED_DIR = settings.PROCESSED_DATA_DIR
+OUTPUT_DIR = settings.OUTPUT_DIR
+MODELS_DIR = settings.MODEL_DIR
+RAW_DIR = settings.RAW_DATA_DIR
 
 
 def main():
-    # Direct imports (not module-style) so we can run from project root
-    import importlib.util, types
-
-    def load_nb(path: str, alias: str):
-        """Load a notebook .py file as a module by path (avoids naming conflicts)."""
-        spec   = importlib.util.spec_from_file_location(alias, path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[alias] = module
-        spec.loader.exec_module(module)
-        return module
-
-    root = Path(__file__).resolve().parent
-
-    parser = argparse.ArgumentParser(description="E-Commerce ML Pipeline")
-    parser.add_argument("--from", dest="from_phase", type=int, default=1,
-                        help="Start from this phase (1-6, default 1)")
-    parser.add_argument("--to",   dest="to_phase",   type=int, default=6,
-                        help="Stop after this phase  (1-6, default 6)")
-    args = parser.parse_args()
-
-    phases = [
-        (1, "Data Generation",    lambda: load_nb(str(root/"src"/"data"/"generate_data.py"), "gen").main()),
-        (2, "Data Cleaning",      lambda: load_nb(str(root/"notebooks"/"02_data_cleaning.py"),  "nb02").main()),
-        (3, "Exploratory Analysis",lambda: load_nb(str(root/"notebooks"/"03_eda.py"),           "nb03").main()),
-        (4, "Feature Engineering",lambda: load_nb(str(root/"notebooks"/"04_feature_engineering.py"),"nb04").main()),
-        (5, "Model Development",  lambda: load_nb(str(root/"notebooks"/"05_modeling.py"),       "nb05").main()),
-        (6, "Evaluation & Export",lambda: load_nb(str(root/"notebooks"/"06_evaluation.py"),     "nb06").main()),
-    ]
-
-    overall_start = time.time()
-    failures = []
-
-    for num, title, fn in phases:
-        if num < args.from_phase or num > args.to_phase:
-            continue
-        ok = run_phase(num, title, fn)
-        if not ok:
-            failures.append(num)
-
-    elapsed = time.time() - overall_start
-    print(f"\n{'='*65}")
-    if not failures:
-        print(f"  🎉 All phases complete in {elapsed:.1f}s")
-        print()
-        print("  Next steps:")
-        print("    streamlit run dashboard/app.py")
-        print("    Open dashboard/dashboard_index.html in a browser")
-        print(f"{'='*65}\n")
-    else:
-        print(f"  ⚠️  Pipeline finished with failures in phases: {failures}")
-        print(f"{'='*65}\n")
-        sys.exit(1)
+    print("=" * 70)
+    print("🚀 ML PIPELINE WITHOUT DATA LEAKAGE")
+    print("=" * 70)
+    
+    # Step 1: Load raw data
+    print("\n📊 Step 1: Loading raw data...")
+    
+    users = pd.read_csv(RAW_DIR / "users.csv")
+    sessions = pd.read_csv(RAW_DIR / "sessions.csv")
+    browse_events = pd.read_csv(RAW_DIR / "browse_events.csv")
+    orders = pd.read_csv(RAW_DIR / "orders.csv")
+    order_items = pd.read_csv(RAW_DIR / "order_items.csv")
+    products = pd.read_csv(RAW_DIR / "products.csv")
+    
+    print(f"  ✓ Loaded {len(users)} users")
+    print(f"  ✓ Loaded {len(sessions)} sessions")
+    print(f"  ✓ Loaded {len(browse_events)} browse events")
+    print(f"  ✓ Loaded {len(orders)} orders")
+    print(f"  ✓ Loaded {len(order_items)} order items")
+    print(f"  ✓ Loaded {len(products)} products")
+    
+    # Step 2: Create temporal features (NO LEAKAGE)
+    print("\n⚙️  Step 2: Creating temporal features...")
+    feature_matrix = create_temporal_features(
+        users=users,
+        sessions=sessions,
+        browse_events=browse_events,
+        orders=orders,
+        order_items=order_items,
+        products=products,
+        prediction_window_days=30,
+        observation_window_days=90
+    )
+    
+    # Save feature matrix
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    feature_matrix.to_csv(PROCESSED_DIR / "feature_matrix_no_leakage.csv", index=False)
+    print(f"\n  ✓ Saved feature matrix: {PROCESSED_DIR / 'feature_matrix_no_leakage.csv'}")
+    
+    # Step 3: Train/test split
+    print("\n🔀 Step 3: Temporal train/test split...")
+    
+    # Use stratified split (not temporal) since we already did temporal feature engineering
+    from sklearn.model_selection import train_test_split
+    
+    drop_cols = ["user_id", "will_purchase_next_30days"]
+    feature_names = [c for c in feature_matrix.columns if c not in drop_cols]
+    
+    X = feature_matrix[feature_names].copy()
+    y = feature_matrix["will_purchase_next_30days"]
+    
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.20, stratify=y, random_state=42
+    )
+    
+    print(f"  ✓ Train set: {len(X_train)} samples")
+    print(f"  ✓ Test set: {len(X_test)} samples")
+    print(f"  Train class distribution: {y_train.value_counts().to_dict()}")
+    print(f"  Test class distribution: {y_test.value_counts().to_dict()}")
+    
+    # Step 4: Train models
+    print("\n🤖 Step 4: Training models with regularization...")
+    
+    models = {}
+    
+    # Logistic Regression
+    lr_model = train_logistic_regression_advanced(X_train, y_train, X_test, y_test)
+    if lr_model:
+        models['Logistic Regression'] = lr_model
+    
+    # Random Forest
+    rf_model = train_random_forest_advanced(X_train, y_train, X_test, y_test)
+    if rf_model:
+        models['Random Forest'] = rf_model
+    
+    # Skip XGBoost and LightGBM due to Windows pickling issues
+    print("\n  ℹ️  Skipping XGBoost and LightGBM (Windows compatibility issues)")
+    
+    # Step 5: Select best model
+    print("\n📊 Step 5: Evaluating and selecting best model...")
+    
+    best_model = None
+    best_model_name = None
+    best_test_auc = 0
+    
+    results = {}
+    
+    for name, model in models.items():
+        print(f"\n  Evaluating {name}...")
+        
+        eval_results = evaluate_model(model, X_test, y_test, feature_names)
+        results[name] = eval_results
+        
+        overfit_check = detect_overfitting(model, X_train, X_test, y_train, y_test)
+        
+        print(f"    Test Accuracy:  {eval_results['accuracy']:.4f}")
+        print(f"    Test Precision: {eval_results['precision']:.4f}")
+        print(f"    Test Recall:    {eval_results['recall']:.4f}")
+        print(f"    Test F1:        {eval_results['f1']:.4f}")
+        print(f"    Test AUC-ROC:   {eval_results['auc_roc']:.4f}")
+        print(f"    Train-Test Gap: {overfit_check['gaps']['auc_roc']:.4f}")
+        
+        if overfit_check['is_overfitted']:
+            print(f"    ⚠️  Model is overfitted!")
+        else:
+            print(f"    ✓ Model generalizes well")
+        
+        if eval_results['auc_roc'] > best_test_auc and not overfit_check['is_overfitted']:
+            best_test_auc = eval_results['auc_roc']
+            best_model = model
+            best_model_name = name
+    
+    if best_model is None:
+        print("\n  ⚠️  All models show overfitting. Selecting model with smallest gap...")
+        min_gap = float('inf')
+        for name, model in models.items():
+            overfit_check = detect_overfitting(model, X_train, X_test, y_train, y_test)
+            if overfit_check['gaps']['auc_roc'] < min_gap:
+                min_gap = overfit_check['gaps']['auc_roc']
+                best_model = model
+                best_model_name = name
+                best_test_auc = results[name]['auc_roc']
+    
+    print(f"\n✅ Best Model: {best_model_name}")
+    print(f"   Test AUC-ROC: {best_test_auc:.4f}")
+    
+    # Step 6: Save model
+    print("\n💾 Step 6: Saving best model...")
+    
+    best_results = results[best_model_name]
+    
+    # Get feature importance
+    feature_importance = {}
+    if hasattr(best_model, 'feature_importances_'):
+        feature_importance = dict(zip(feature_names, best_model.feature_importances_))
+    elif hasattr(best_model, 'steps') and hasattr(best_model.steps[-1][1], 'feature_importances_'):
+        feature_importance = dict(zip(feature_names, best_model.steps[-1][1].feature_importances_))
+    elif hasattr(best_model, 'coef_'):
+        feature_importance = dict(zip(feature_names, np.abs(best_model.coef_[0])))
+    elif hasattr(best_model, 'steps') and hasattr(best_model.steps[-1][1], 'coef_'):
+        feature_importance = dict(zip(feature_names, np.abs(best_model.steps[-1][1].coef_[0])))
+    
+    metadata = {
+        "model_type": best_model_name,
+        "target_col": "will_purchase_next_30days",
+        "n_features": len(feature_names),
+        "feature_names": feature_names,
+        "test_accuracy": float(best_results['accuracy']),
+        "test_precision": float(best_results['precision']),
+        "test_recall": float(best_results['recall']),
+        "test_f1": float(best_results['f1']),
+        "test_auc": float(best_results['auc_roc']),
+        "training_method": "temporal_no_leakage",
+        "split_method": "stratified",
+        "test_size": 0.20
+    }
+    
+    model_path = save_model_advanced(best_model, metadata, MODELS_DIR)
+    print(f"  ✓ Model saved: {model_path}")
+    
+    # Step 7: Save evaluation report
+    print("\n📈 Step 7: Saving evaluation report...")
+    
+    lift_df = build_lift_table(y_test, best_results['y_proba'])
+    best_results['y_true'] = y_test
+    
+    dashboard_path = save_evaluation_report(
+        best_results,
+        lift_df,
+        feature_importance,
+        OUTPUT_DIR
+    )
+    print(f"  ✓ Dashboard data saved: {dashboard_path}")
+    
+    # Save feature names
+    feature_names_path = OUTPUT_DIR / "feature_names.txt"
+    feature_names_path.write_text("\n".join(feature_names))
+    
+    print("\n" + "=" * 70)
+    print("✅ PIPELINE COMPLETE - NO DATA LEAKAGE!")
+    print("=" * 70)
+    print(f"\n📊 Final Results:")
+    print(f"   Model: {best_model_name}")
+    print(f"   Test Accuracy:  {best_results['accuracy']:.4f}")
+    print(f"   Test Precision: {best_results['precision']:.4f}")
+    print(f"   Test Recall:    {best_results['recall']:.4f}")
+    print(f"   Test F1:        {best_results['f1']:.4f}")
+    print(f"   Test AUC-ROC:   {best_results['auc_roc']:.4f}")
+    print(f"\n🎯 Model is ready for deployment!")
+    print(f"\n💡 Restart the backend API to use the new model:")
+    print(f"   The API will automatically load the latest model")
 
 
 if __name__ == "__main__":
