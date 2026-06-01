@@ -716,4 +716,8 @@ class AdvancedModelTrainer(ModelTrainer):
 # DESIGN15  compute_learning_curves() added — diagnose bias/variance tradeoff.
 # DESIGN16  CatBoost tuned with same CV framework as every other model.
 # DESIGN17  temporal_split uses *_since_* columns (real time proxy) with
+<<<<<<< HEAD
 #            explicit fallback chain; account_age_days is the last resort.
+=======
+#            explicit fallback chain; account_age_days is the last resort.
+>>>>>>> 5f671f83a8ebd500055bd8e2ef0009a91cab4ee9

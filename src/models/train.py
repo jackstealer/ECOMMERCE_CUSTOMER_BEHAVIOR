@@ -688,4 +688,8 @@ class ModelTrainer:
             metadata,
             models_dir,
             feature_names=self.feature_names,
+<<<<<<< HEAD
         )
+=======
+        )
+>>>>>>> 5f671f83a8ebd500055bd8e2ef0009a91cab4ee9
