@@ -101,12 +101,29 @@ def create_order_features(
     orders: pd.DataFrame,
     order_items: pd.DataFrame,
     snapshot: pd.Timestamp,
+    cutoff_date: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
-    """Aggregate orders to user level."""
+    """
+    Aggregate orders to user level with temporal split for proper prediction.
+    
+    Args:
+        cutoff_date: If provided, only uses orders BEFORE this date for features.
+                    Orders after cutoff are used to create the prediction target.
+    """
     orders = orders.copy()
     orders["order_date"] = pd.to_datetime(orders["order_date"])
+    
+    # Split orders into training period and prediction period
+    if cutoff_date is not None:
+        cutoff_date = pd.Timestamp(cutoff_date)
+        training_orders = orders[orders["order_date"] < cutoff_date]
+        future_orders = orders[orders["order_date"] >= cutoff_date]
+    else:
+        training_orders = orders
+        future_orders = pd.DataFrame()
 
-    order_agg = orders.groupby("user_id").agg(
+    # Features from PAST orders only (no data leakage)
+    order_agg = training_orders.groupby("user_id").agg(
         total_orders     =("order_id",     "count"),
         total_spend      =("total_amount", "sum"),
         avg_order_value  =("total_amount", "mean"),
@@ -117,7 +134,7 @@ def create_order_features(
     ).reset_index()
 
     order_agg["days_since_last_order"] = (
-        snapshot - order_agg["last_order_date"]
+        cutoff_date if cutoff_date else snapshot - order_agg["last_order_date"]
     ).dt.days
     order_agg["customer_lifespan_days"] = (
         order_agg["last_order_date"] - order_agg["first_order_date"]
@@ -127,10 +144,15 @@ def create_order_features(
         order_agg["total_orders"]
         / (order_agg["customer_lifespan_days"] / 30).replace(0, np.nan)
     ).fillna(order_agg["total_orders"])
-    # Cap extreme outlier values (e.g. 1-day customers with 5 orders → 150/month)
     order_agg["order_frequency"] = order_agg["order_frequency"].clip(upper=30)
 
     order_agg = order_agg.drop(columns=["last_order_date", "first_order_date"])
+    
+    # Target: will user purchase in FUTURE period (after cutoff)?
+    if cutoff_date is not None and not future_orders.empty:
+        future_buyers = future_orders["user_id"].unique()
+        order_agg["will_purchase_future"] = order_agg["user_id"].isin(future_buyers).astype(int)
+    
     return order_agg
 
 
