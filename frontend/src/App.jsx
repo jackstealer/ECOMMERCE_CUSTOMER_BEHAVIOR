@@ -13,7 +13,7 @@ import {
   Filler
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
-import { Activity, Target, TrendingUp, Zap, Award, BarChart2, RefreshCw, Users, DollarSign, ShoppingCart } from 'lucide-react';
+import { Activity, Target, TrendingUp, Zap, Award, BarChart2, RefreshCw, Users, DollarSign, ShoppingCart, Download, PieChart } from 'lucide-react';
 
 ChartJS.register(
   CategoryScale,
@@ -56,6 +56,7 @@ const AnimatedCounter = ({ value, suffix = '', duration = 2000 }) => {
 };
 
 function App() {
+  const [activeTab, setActiveTab] = useState('dashboard');
   const [dashboardData, setDashboardData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -121,6 +122,16 @@ function App() {
       setLoading(false);
     }
     setRefreshing(false);
+  };
+
+  const exportData = () => {
+    if (!dashboardData) return;
+    const dataStr = JSON.stringify(dashboardData, null, 2);
+    const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+    const link = document.createElement('a');
+    link.setAttribute('href', dataUri);
+    link.setAttribute('download', `dashboard_data_${new Date().toISOString().slice(0,10)}.json`);
+    link.click();
   };
 
   const handlePredict = async (e) => {
@@ -214,19 +225,40 @@ function App() {
 
   return (
     <div className="dashboard-container">
-      <header>
+      <header style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
         <div className="logo">
           <h1>🚀 Customer Analytics Platform</h1>
           <span>Enterprise ML-Powered Insights • Real-time Predictions</span>
         </div>
-        <button 
-          onClick={fetchDashboardData} 
-          disabled={refreshing}
-          style={{
-            padding: '0.75rem 1.5rem',
-            background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
-            border: 'none',
-            borderRadius: '8px',
+        <div style={{display: 'flex', gap: '1rem'}}>
+          <button 
+            onClick={exportData} 
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
+              border: 'none',
+              borderRadius: '8px',
+              color: 'white',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+              fontSize: '0.9rem',
+              fontWeight: '600',
+              transition: 'all 0.3s ease'
+            }}
+          >
+            <Download size={18} />
+            Export
+          </button>
+          <button 
+            onClick={fetchDashboardData} 
+            disabled={refreshing}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
+              border: 'none',
+              borderRadius: '8px',
             color: 'white',
             cursor: refreshing ? 'not-allowed' : 'pointer',
             display: 'flex',
@@ -241,6 +273,7 @@ function App() {
           <RefreshCw size={18} style={{animation: refreshing ? 'spin 1s linear infinite' : 'none'}} />
           {refreshing ? 'Refreshing...' : 'Refresh Data'}
         </button>
+        </div>
       </header>
 
       {lastUpdated && (
@@ -262,6 +295,34 @@ function App() {
         </div>
       )}
 
+      {/* Tab Navigation */}
+      <nav className="tab-nav">
+        <button 
+          className={`tab-button ${activeTab === 'dashboard' ? 'active' : ''}`}
+          onClick={() => setActiveTab('dashboard')}
+        >
+          <BarChart2 size={18} />
+          Dashboard
+        </button>
+        <button 
+          className={`tab-button ${activeTab === 'predictions' ? 'active' : ''}`}
+          onClick={() => setActiveTab('predictions')}
+        >
+          <Zap size={18} />
+          Predictions
+        </button>
+        <button 
+          className={`tab-button ${activeTab === 'analytics' ? 'active' : ''}`}
+          onClick={() => setActiveTab('analytics')}
+        >
+          <PieChart size={18} />
+          Analytics
+        </button>
+      </nav>
+
+      {/* Dashboard Tab Content */}
+      {activeTab === 'dashboard' && (
+      <>
       <section className="metrics-grid">
         <div className="metric-card">
           <div style={{display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem'}}>
@@ -586,6 +647,40 @@ function App() {
           )}
         </div>
       </section>
+      </>
+      )}
+
+      {/* Predictions Tab Content */}
+      {activeTab === 'predictions' && (
+        <div style={{textAlign: 'center', padding: '3rem', color: 'var(--text-muted)'}}>
+          <Zap size={64} style={{opacity: 0.5, marginBottom: '1.5rem'}} />
+          <h2 style={{fontSize: '1.5rem', marginBottom: '1rem', color: 'var(--text-primary)'}}>
+            Predictions Feature
+          </h2>
+          <p>Advanced prediction capabilities coming soon. Use the form below for real-time predictions.</p>
+        </div>
+      )}
+
+      {/* Analytics Tab Content */}
+      {activeTab === 'analytics' && (
+        <div style={{textAlign: 'center', padding: '3rem', color: 'var(--text-muted)'}}>
+          <PieChart size={64} style={{opacity: 0.5, marginBottom: '1.5rem'}} />
+          <h2 style={{fontSize: '1.5rem', marginBottom: '1rem', color: 'var(--text-primary)'}}>
+            Customer Analytics & Insights
+          </h2>
+          <p>Comprehensive analytics dashboards with customer segmentation and behavioral insights.</p>
+          <div style={{marginTop: '2rem', padding: '1.5rem', background: 'rgba(59, 130, 246, 0.1)', borderRadius: '12px', maxWidth: '600px', margin: '2rem auto'}}>
+            <h3 style={{color: 'var(--text-primary)', marginBottom: '1rem'}}>Coming Soon</h3>
+            <ul style={{listStyle: 'none', padding: 0, color: 'var(--text-secondary)'}}>
+              <li style={{padding: '0.5rem'}}>📊 Customer Segmentation Analysis</li>
+              <li style={{padding: '0.5rem'}}>💎 High-Value Customer Identification</li>
+              <li style={{padding: '0.5rem'}}>⚠️ At-Risk Customer Detection</li>
+              <li style={{padding: '0.5rem'}}>🆕 New Customer Onboarding Metrics</li>
+              <li style={{padding: '0.5rem'}}>🔥 Engagement & Activity Tracking</li>
+            </ul>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
